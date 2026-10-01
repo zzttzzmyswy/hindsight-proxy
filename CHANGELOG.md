@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.3
+
+Make the end-to-end script reproducible and re-runnable. No change to routing,
+ownership or tool behaviour.
+
+- Drive the `own`-scope check from a storage-layer wait rather than a burst of
+  reads through the own-scoped token. A read issued while extraction is still in
+  flight makes the outcome depend on timing, which a check asserting isolation
+  must not do. The read path is now observed once, after the data has settled.
+- Report a skip rather than a failure when the auto-create bank already exists,
+  so running the script twice against one deployment is meaningful.
+- Give the hot-reload check its own rule to edit, so it can no longer leave the
+  tool-trimming check broken for a later run.
+- Reconcile the tool-surface figures with their serializer basis: 2626 / 2689
+  with compact separators (what the proxy emits), 2801 / 2864 with a
+  pretty-printer's spacing. Same payload; the wire reading exceeds 3000 either
+  way.
+- Note the async-extraction latency explicitly, and that a literal search over
+  memories fails even for a write that succeeded.
+
 ## v0.1.2
 
 Fixes the deployment path and makes the end-to-end script actually reproduce the

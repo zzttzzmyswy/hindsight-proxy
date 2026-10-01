@@ -112,6 +112,10 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 | 再加工具名（`ToolSurfaceSize()`） | 2689 | 测试与 `make check` 用的口径，即上面这条加上 name |
 | `tools/list` 实际下发字节 | 3441 | 最接近 issue「控制上下文膨胀」本意的口径 |
 
+上表是**紧凑序列化**（`json.Marshal` 默认，即代理实际发出的字节）。若用 Python
+默认的带空格分隔符统计，前两档会变成 **2801 / 2864**——数字不同但 payload 完全相同，
+只是分隔符；引用数字时请注明口径。
+
 前两个口径**低于 3000**；第三个（含 MCP safety annotations）**高于 3000**。annotations 由 MCP SDK
 在序列化时补全（`readOnlyHint` / `additiveHint` / `openWorldHint` / `idempotentHint`），每个工具约 66–91
 字符，6 个共 421 字符，是不可省略的协议字段。若要求按实际下发字节也 < 3000，需要进一步精简
@@ -149,6 +153,20 @@ Hindsight 原生 36 个工具中的破坏性工具（`delete_bank` / `clear_memo
 
 `own` 下：调用方无法通过点名别人的 tag 来扩大自己的可见范围；`get_memory` 对非自己的记忆返回
 "不存在"而非"无权限"，避免探测。
+
+### 写入后不要立刻用 own token 轮询（重要）
+
+Hindsight 是**异步**把 document 抽取成 memory 的：实测 document 的 `memory_unit_count` 从 0 变正
+需要约 10–15s。所以写完立刻 `recall` 返回空是**合法**的，不代表代理有问题。
+
+要断言「own 调用方能看到自己写的」，**不要用 own token 反复轮询等结果**。正确做法是用**上游管理
+token** 等落库（`GET /v1/default/banks/{bank}/memories/list` 直到目标 tag 计数 > 0），确认抽取完成后
+再用 own token 读一次。`scripts/verify_e2e.sh` 的 read_scope 段就是这么做的：读路径只被观察一次，
+且发生在数据稳定之后。
+
+> 说明：关于「轮询读本身会污染归属 tag」这一条，我们在 13.24 上做过对照实验（同一探针文本，
+> 一侧用 own token 轮询、一侧静默等待，各 3 次），**未能复现**——两组最终 tag 都正确。该现象在
+> NAS 上被观察到，但成因尚未确认，因此这里不作为已证结论；改成上游等待是无论成因都成立的做法。
 
 ## 验收对照
 

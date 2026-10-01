@@ -80,11 +80,22 @@ deployment.
 
 **Hindsight derives memories asynchronously, and rewrites the text.** A retained
 document is turned into memory units by an LLM, with a latency of ten-odd
-seconds, and the derived text is not the text that was submitted. So the checks
-that need memories rather than documents wait for extraction instead of racing
-it, and the storage-layer assertions key on the document's `content_hash`
-(sha256 of the submitted text) rather than on a text search. Searching memories
-for a literal probe string fails even when the write succeeded.
+seconds (the document's `memory_unit_count` goes from 0 to positive), and the
+derived text is not the text that was submitted. Three consequences:
+
+- The checks that need memories rather than documents wait for extraction
+  instead of racing it.
+- Storage-layer assertions avoid a text search entirely: they key on the
+  document's `content_hash` (sha256 of the submitted text), because searching
+  memories for a literal probe string fails even when the write succeeded.
+- The `own`-scope check waits on the storage layer with the management token
+  and reads through the proxy exactly once, after the data has settled. A wait
+  implemented as a burst of reads through the proxy would make the result
+  depend on the timing of those reads. (The failure seen in the field was an
+  own-scoped recall coming back empty; our controlled comparison of
+  poll-vs-wait did not reproduce a tag-ownership effect, so the storage-side
+  wait is adopted because it is correct regardless of the mechanism. See the
+  note in `README.md`.)
 
 **The tool-surface budget has three readings.** They differ because MCP safety
 annotations are added by the SDK at serialization time:
@@ -101,7 +112,18 @@ growth, which argues for the wire reading, so treat this as an open item rather
 than a closed one -- `recall` and `reflect` schemas (~600 and ~500 characters)
 are where the remaining fat is.
 
-## 4. Clean up
+These figures use compact JSON separators (`json.Marshal` defaults, which is what
+the proxy emits). Measuring the same payload with a pretty-printer's spaced
+separators gives 2801 / 2864 instead; the payload is identical, so quote the
+serializer basis alongside the number. Both readings agree the wire bytes exceed
+3000.
+
+## 4. Re-running, then clean up
+
+The script is safe to run repeatedly against the same deployment: the rule it
+edits belongs to a token no other check reads, and the one assertion that needs a
+never-used bank reports a skip instead of a failure once that bank exists. To
+re-assert absence, regenerate the table with `--write-config`.
 
 ```bash
 docker rm -f hindsight-e2e
