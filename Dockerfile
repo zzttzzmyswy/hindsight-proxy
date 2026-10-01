@@ -1,6 +1,6 @@
 # Build stage. CGO is off so the result is a static binary that runs on any
 # linux/amd64 or linux/arm64 base without a libc dependency.
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 
 WORKDIR /src
 

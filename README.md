@@ -159,6 +159,9 @@ Hindsight 原生 36 个工具中的破坏性工具（`delete_bank` / `clear_memo
 go test ./... -race
 ```
 
+真实端到端（起一个真的 Hindsight 跑全套）见 [`docs/verification.md`](docs/verification.md) 与
+[`scripts/verify_e2e.sh`](scripts/verify_e2e.sh)。
+
 ## 运维
 
 ```bash
