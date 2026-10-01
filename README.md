@@ -27,10 +27,11 @@ Hindsight 侧同时开启认证，因此代理是唯一入口：agent 拿不到�
 ## 快速开始
 
 ```bash
-cp examples/tokens.json tokens.json     # 改成真实 token
+cp examples/tokens.example.json tokens.json  # 改成真实 token
 export HINDSIGHT_TOKEN=<上游管理 token>  # out-of-band 获取，不要提交
-docker compose up -d
+docker compose up -d --build             # 镜像未发布到 registry，本地构建
 curl -s localhost:8890/healthz
+docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 healthy
 ```
 
 ## 配置
@@ -103,7 +104,18 @@ curl -s localhost:8890/healthz
 
 ## 工具
 
-默认暴露 6 个工具，合计 description + schema **< 3000 字符**：
+默认暴露 6 个工具。工具面的字符数有三种口径，含义不同，这里都列出（实测值）：
+
+| 口径 | 字符数 | 说明 |
+| --- | --- | --- |
+| description + schema | 2626 | issue 验收标准 4 的字面口径 |
+| 再加工具名（`ToolSurfaceSize()`） | 2689 | 测试与 `make check` 用的口径，即上面这条加上 name |
+| `tools/list` 实际下发字节 | 3441 | 最接近 issue「控制上下文膨胀」本意的口径 |
+
+前两个口径**低于 3000**；第三个（含 MCP safety annotations）**高于 3000**。annotations 由 MCP SDK
+在序列化时补全（`readOnlyHint` / `additiveHint` / `openWorldHint` / `idempotentHint`），每个工具约 66–91
+字符，6 个共 421 字符，是不可省略的协议字段。若要求按实际下发字节也 < 3000，需要进一步精简
+`recall` / `reflect` 的 schema（这两个各约 600 / 500 字符，是主要开销）。
 
 | 工具 | 说明 |
 | --- | --- |
@@ -145,7 +157,7 @@ Hindsight 原生 36 个工具中的破坏性工具（`delete_bank` / `clear_memo
 | 1 | 未知 token → 401；已知 token 按其 `bank` 路由 | `TestUnknownTokenIsRejectedWithoutFallingBack`、`TestKnownTokenRoutesToItsBank` |
 | 2 | 两个 token 指向不同 bank，写入互不可见 | `TestTwoTokensOnDifferentBanksCannotSeeEachOther` |
 | 3 | 伪造 `agent:别人` 被剥离，库里只有真实归属 | `TestCallerSuppliedAgentTagsAreStrippedAndReplaced` |
-| 4 | 工具按 token 裁剪；6 个工具合计 < 3000 字符 | `TestToolListIsTrimmedPerToken`、`TestToolSurfaceStaysWithinItsBudget` |
+| 4 | 工具按 token 裁剪；6 个工具合计 < 3000 字符 | `TestToolListIsTrimmedPerToken`、`TestToolSurfaceStaysWithinItsBudget`（按 description+schema 口径，见上文三种口径） |
 | 5 | 映射表改动不重启即生效 | `TestRoutingTableChangeTakesEffectWithoutRestart` |
 | 6 | 目标 bank 不存在时自动创建 | `TestBankIsCreatedOnDemand` |
 
@@ -187,4 +199,5 @@ curl -s localhost:8890/healthz             # {"status":"ok","upstream":"ok","rul
 | 取单条 | `GET /v1/default/banks/{bank_id}/memories/{memory_id}` |
 | 列 tag | `GET /v1/default/banks/{bank_id}/tags` |
 
-bank_id 一律由 token 解析得出，请求体里若带 `bank_id` 会被忽略。
+bank_id 一律由 token 解析得出。请求体里若带 `bank_id`，该字段被丢弃——写入的出站请求是按白名单
+字段重建的，`bank_id` 不在白名单里，因此调用方无法指定 bank。

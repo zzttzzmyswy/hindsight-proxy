@@ -80,9 +80,6 @@ func run() error {
 	if s.healthcheck {
 		return probeHealth(s.healthcheckURL)
 	}
-	if s.healthcheck {
-		return probeHealth(s.healthcheckURL)
-	}
 
 	logger, err := newLogger(s.logLevel)
 	if err != nil {

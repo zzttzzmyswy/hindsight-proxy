@@ -6,11 +6,15 @@
 
 services:
   hindsight-proxy:
-    image: ghcr.io/zzttzzmyswy/hindsight-proxy:0.1.1
+    # Built locally rather than pulled: this image is not published to a
+    # registry. Run `docker compose up -d --build` so the tag is produced from
+    # the source in this directory. Change the name to whatever your registry
+    # uses if you decide to publish one.
+    image: hindsight-proxy:0.1.2
     build:
       context: .
       args:
-        VERSION: 0.1.1
+        VERSION: 0.1.2
     container_name: hindsight-proxy
     restart: unless-stopped
     ports:
@@ -31,7 +35,9 @@ services:
     # The container has no shell and no package manager, so health is checked
     # with the binary's own probe.
     healthcheck:
-      test: ["CMD", "/hindsight-proxy", "-healthcheck", "-healthcheck-url", "http://127.0.0.1:8890/healthz"]
+      # Absolute path to the binary as copied in the Dockerfile. An exec-form
+      # test does not inherit ENTRYPOINT, so this must be the full path.
+      test: ["CMD", "/usr/local/bin/hindsight-proxy", "-healthcheck", "-healthcheck-url", "http://127.0.0.1:8890/healthz"]
       interval: 30s
       timeout: 6s
       retries: 3

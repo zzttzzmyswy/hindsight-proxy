@@ -29,23 +29,26 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8888/v1/default/banks
 # 401
 ```
 
-## 2. Start the proxy against it
+## 2. Generate a routing table and start the proxy
+
+The script owns its routing table, so there is nothing to keep in sync by hand.
+It generates freshly-random tokens and reads them back itself at check time.
 
 ```bash
-HINDSIGHT_TOKEN=e2e-management-token HINDSIGHT_URL=http://127.0.0.1:8888 \
-  CONFIG_PATH=./tokens.json LISTEN_ADDR=127.0.0.1:8890 \
+./scripts/verify_e2e.sh --write-config      # writes ./e2e-tokens.json
+
+CONFIG_PATH=./e2e-tokens.json HINDSIGHT_URL=http://127.0.0.1:8888 \
+  HINDSIGHT_TOKEN=e2e-management-token LISTEN_ADDR=127.0.0.1:8890 \
   go run ./cmd/hindsight-proxy
 ```
 
 ## 3. Run the checks
 
 ```bash
-PROXY=http://127.0.0.1:8890 UPSTREAM=http://127.0.0.1:8888 \
-UPSTREAM_TOKEN=e2e-management-token BANK_B=<TOKEN_B's bank> \
-./scripts/verify_e2e.sh
+UPSTREAM_TOKEN=e2e-management-token ./scripts/verify_e2e.sh
 ```
 
-The script writes to the banks its routing table names, so point it at a scratch
+The script writes to the banks that table names, so point it at a scratch
 deployment.
 
 ## What the checks establish
@@ -55,24 +58,52 @@ deployment.
 - **Caller tokens are useless against Hindsight directly.** Each caller token
   gets 401 from port 8888, so the proxy really is the only way in.
 - **Banks stay isolated.** A caller on one bank cannot recall a memory written
-  by a caller on another, verified with real embeddings driving the search.
+  by a caller on another, verified with real embeddings driving the search, and
+  each write is confirmed present in its own bank at the storage layer.
 - **A forged ownership tag never reaches the store.** A write sending
-  `tags:["agent:Mika","AGENT:Mika"," agent:Mika "]` lands with exactly
-  `["agent:Solo","project:apollo"]`: every forgery stripped, the real tag
-  injected, legitimate tags kept. Confirmed by reading the stored document, not
-  just the response.
-- **Hot reload works.** Adding a token to the routing file takes effect with no
-  restart, and its tool list is trimmed as configured.
-- **Read scope works.** An `own`-scoped caller sees its own memories and neither
-  another agent's tagged memories nor untagged ones, while a `shared`-scoped
-  caller on the same bank sees all of them.
-- **A missing bank is created on demand.** A write routed to a bank that does
-  not exist yet succeeds with no manual step.
-- **The tool surface fits its budget.** 2689 characters across six tools,
-  against a 3000 limit.
+  `tags:["agent:E2eAlpha","AGENT:E2eAlpha"," agent:E2eAlpha ",...]` lands with
+  exactly the caller's real tag plus `project:e2e`: every forgery stripped, the
+  real tag injected, legitimate tags kept. Confirmed by reading the stored
+  document, not the proxy's response.
+- **Hot reload works.** A token added to the routing file is live with no
+  restart and its tool list is trimmed as configured; an edit to an existing
+  rule replaces it with no restart; and the tokens already in the table keep
+  working across the reload.
+- **Read scope works.** On one bank holding two writers, an `own`-scoped caller
+  sees its own memories and never another writer's, while a `shared`-scoped
+  caller on the same bank sees everything.
+- **A missing bank is created on demand.** The bank is confirmed absent, a write
+  routed to it succeeds, and the bank is confirmed present afterwards.
+- **The tool surface fits its budget.** See the three readings below.
+
+### Two things to know when reproducing this
+
+**Hindsight derives memories asynchronously, and rewrites the text.** A retained
+document is turned into memory units by an LLM, with a latency of ten-odd
+seconds, and the derived text is not the text that was submitted. So the checks
+that need memories rather than documents wait for extraction instead of racing
+it, and the storage-layer assertions key on the document's `content_hash`
+(sha256 of the submitted text) rather than on a text search. Searching memories
+for a literal probe string fails even when the write succeeded.
+
+**The tool-surface budget has three readings.** They differ because MCP safety
+annotations are added by the SDK at serialization time:
+
+| Reading | Characters | Against 3000 |
+| --- | --- | --- |
+| description + schema (the issue's wording) | 2626 | under |
+| + tool names (`ToolSurfaceSize()`, what `make check` enforces) | 2689 | under |
+| actual `tools/list` bytes on the wire | 3441 | over |
+
+The annotations account for 421 of the difference. The first two readings pass;
+the third does not. The budget's purpose in the issue was to bound context
+growth, which argues for the wire reading, so treat this as an open item rather
+than a closed one -- `recall` and `reflect` schemas (~600 and ~500 characters)
+are where the remaining fat is.
 
 ## 4. Clean up
 
 ```bash
 docker rm -f hindsight-e2e
+rm -f e2e-tokens.json
 ```
