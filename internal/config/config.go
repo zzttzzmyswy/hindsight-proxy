@@ -11,7 +11,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -254,11 +253,9 @@ type Manager struct {
 	path      string
 	knownTool func(string) bool
 	cur       atomic.Pointer[Config]
-	mu        sync.Mutex
 	// last fingerprints the config content last adopted, so Watch reacts to a
-	// real change rather than to a timestamp touch.
+	// real change rather than a timestamp touch. Only Watch reads or writes it.
 	last   string
-	subs   []func(*Config)
 	logger *slog.Logger
 }
 
@@ -280,13 +277,6 @@ func NewManager(path string, knownTool func(string) bool, logger *slog.Logger) (
 // Current returns the snapshot serving requests right now.
 func (m *Manager) Current() *Config { return m.cur.Load() }
 
-// OnReload registers a callback fired after every successful reload.
-func (m *Manager) OnReload(f func(*Config)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.subs = append(m.subs, f)
-}
-
 // Reload re-reads the file. On any error the previous snapshot stays live.
 func (m *Manager) Reload() error {
 	cfg, err := Load(m.path, m.knownTool)
@@ -294,12 +284,6 @@ func (m *Manager) Reload() error {
 		return err
 	}
 	m.cur.Store(cfg)
-	m.mu.Lock()
-	subs := append([]func(*Config){}, m.subs...)
-	m.mu.Unlock()
-	for _, f := range subs {
-		f(cfg)
-	}
 	return nil
 }
 
@@ -310,9 +294,7 @@ func (m *Manager) Watch(interval time.Duration, stop <-chan struct{}) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
-	m.mu.Lock()
 	last := m.last
-	m.mu.Unlock()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -327,9 +309,7 @@ func (m *Manager) Watch(interval time.Duration, stop <-chan struct{}) {
 			// Advance the baseline even on a failed load: the file content at
 			// `now` has been seen, and not advancing would retry it every tick
 			// and bury the real error in repeated log lines.
-			m.mu.Lock()
 			m.last = now
-			m.mu.Unlock()
 			last = now
 			if err := m.Reload(); err != nil {
 				m.logger.Error("config reload failed, keeping previous routing table",

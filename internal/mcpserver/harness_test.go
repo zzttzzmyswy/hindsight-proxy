@@ -252,3 +252,14 @@ func mustJSON(t *testing.T, v any) string {
 }
 
 var _ = fmt.Sprintf
+
+// writeFileAtomically replaces path the way a deployment would: write a sibling
+// temp file, then rename over the target. A reader never observes a partial
+// file, which is what makes reload-on-change safe under concurrent writes.
+func writeFileAtomically(path, body string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

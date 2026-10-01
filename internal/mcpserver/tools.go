@@ -20,11 +20,22 @@ const (
 	ToolListTags     = "list_tags"
 )
 
-// destructiveUpstream lists Hindsight MCP tools that mutate or delete data
-// irreversibly. None of them is part of this proxy's surface: even a token with
-// tools:"*" cannot reach them, because the proxy never registers them.
-var destructiveUpstream = []string{
+// bannedTools are upstream Hindsight tools that mutate or delete data
+// irreversibly. None of them is part of this proxy's surface: a caller cannot
+// reach them even with tools:"*", because the proxy only ever registers what is
+// in Registry.
+var bannedTools = []string{
 	"delete_bank", "clear_memories", "delete_document",
+}
+
+// init fails the process if a banned tool is ever added to the registry, so the
+// guarantee is enforced rather than merely documented.
+func init() {
+	for _, banned := range bannedTools {
+		if KnownTool(banned) {
+			panic("tool " + banned + " is destructive and must not be exposed")
+		}
+	}
 }
 
 // obj is shorthand for a JSON-Schema object node.
@@ -50,10 +61,6 @@ func integer(desc string) map[string]any {
 
 func strArray(desc string) map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
-}
-
-func strMap(desc string) map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": desc}
 }
 
 // ToolDef is one tool this proxy serves, with the upstream REST binding.

@@ -224,17 +224,6 @@ func instructionsFor(rule config.Rule) string {
 // used by the health endpoint to keep the surface within its budget.
 func ToolSurfaceSize() int { return toolSurfaceSize(sdkTools()) }
 
-// unavailableToolsIn reports any configured tool name this proxy does not serve.
-func unavailableToolsIn(names []string) []string {
-	var out []string
-	for _, n := range names {
-		if !KnownTool(n) {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
 func bearerToken(header string) (string, bool) {
 	const prefix = "Bearer "
 	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {

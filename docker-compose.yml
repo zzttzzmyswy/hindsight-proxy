@@ -6,11 +6,11 @@
 
 services:
   hindsight-proxy:
-    image: ghcr.io/zzttzzmyswy/hindsight-proxy:0.1.0
+    image: ghcr.io/zzttzzmyswy/hindsight-proxy:0.1.1
     build:
       context: .
       args:
-        VERSION: 0.1.0
+        VERSION: 0.1.1
     container_name: hindsight-proxy
     restart: unless-stopped
     ports:

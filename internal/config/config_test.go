@@ -231,11 +231,6 @@ func TestManagerKeepsServingAfterABadEdit(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	var reloadErrs int
-	var mu = make(chan struct{}, 1)
-	mu <- struct{}{}
-	mgr.OnReload(func(*Config) { <-mu })
-
 	if err := os.WriteFile(path, []byte(`{"tokens":{}}`), 0o600); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -245,22 +240,26 @@ func TestManagerKeepsServingAfterABadEdit(t *testing.T) {
 	if _, ok := mgr.Current().Lookup("t1"); !ok {
 		t.Fatal("the previous routing table was lost after a failed reload")
 	}
-	_ = reloadErrs
 }
 
-func TestReloadNotifiesSubscribers(t *testing.T) {
+// Reload must adopt a valid edit.
+func TestReloadAdoptsAValidEdit(t *testing.T) {
 	path := write(t, `{"default_bank":"b","tokens":{"t1":{"agent":"A","tools":"*"}}}`)
 	mgr, err := NewManager(path, known, testLogger())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	var got int
-	mgr.OnReload(func(*Config) { got++ })
+	if err := os.WriteFile(path, []byte(`{"default_bank":"c","tokens":{"t2":{"agent":"B","tools":"*"}}}`), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
 	if err := mgr.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if got != 1 {
-		t.Fatalf("subscriber fired %d times, want 1", got)
+	if _, ok := mgr.Current().Lookup("t2"); !ok {
+		t.Fatal("the reloaded table was not adopted")
+	}
+	if _, ok := mgr.Current().Lookup("t1"); ok {
+		t.Fatal("a token removed by the edit is still routable")
 	}
 }
 
