@@ -45,8 +45,9 @@ dist:
 # Tag and publish. Refuses to reuse an existing tag, so a version is never
 # overwritten once published.
 release: dist
-	@git rev-parse -q --verify refs/tags/v$(VERSION) >/dev/null && { \
-		echo "tag v$(VERSION) already exists; bump VERSION"; exit 1; }
+	@if git rev-parse -q --verify refs/tags/v$(VERSION) >/dev/null; then \
+		echo "tag v$(VERSION) already exists; bump VERSION"; exit 1; \
+	fi
 	git tag -a v$(VERSION) -m "hindsight-proxy v$(VERSION)"
 	git push origin v$(VERSION)
 	gh release create v$(VERSION) --title "hindsight-proxy v$(VERSION)" \
