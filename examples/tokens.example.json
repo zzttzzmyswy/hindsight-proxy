@@ -1,0 +1,41 @@
+{
+  "default_bank": "shared",
+  "tokens": {
+    "REPLACE-WITH-A-RANDOM-TOKEN-FOR-THE-OPS-AGENT": {
+      "agent": "Mika",
+      "bank": "ops",
+      "tools": "*",
+      "description": "ops agent: reads and writes the ops bank, sees the whole bank"
+    },
+    "REPLACE-WITH-A-RANDOM-TOKEN-FOR-THE-GENERAL-AGENT": {
+      "agent": "Riven",
+      "bank": "shared",
+      "tools": "*",
+      "description": "general agent: shared bank, no tool trimming, sees the whole bank"
+    },
+    "REPLACE-WITH-A-RANDOM-TOKEN-FOR-THE-PRIVATE-AGENT": {
+      "agent": "Solo",
+      "bank": "shared",
+      "read_scope": "own",
+      "tools": [
+        "retain",
+        "recall",
+        "reflect",
+        "list_memories",
+        "get_memory",
+        "list_tags"
+      ],
+      "description": "private agent: shares the bank but only ever reads back its own writes"
+    },
+    "REPLACE-WITH-A-RANDOM-TOKEN-FOR-THE-READONLY-AGENT": {
+      "agent": "Watcher",
+      "bank": "ops",
+      "tools": [
+        "recall",
+        "list_memories",
+        "list_tags"
+      ],
+      "description": "read-only agent: cannot write at all"
+    }
+  }
+}

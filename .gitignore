@@ -1,0 +1,6 @@
+# Local routing tables carry real tokens.
+tokens.json
+.env
+# Local build output.
+/hindsight-proxy
+dist/

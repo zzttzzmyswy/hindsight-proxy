@@ -1,0 +1,52 @@
+# hindsight-proxy
+#
+# Fronts the Hindsight API. Point HINDSIGHT_URL at the existing hindsight-api
+# container and mount the routing table read-only; editing that file takes
+# effect without a restart.
+
+services:
+  hindsight-proxy:
+    image: ghcr.io/zzttzzmyswy/hindsight-proxy:0.1.0
+    build:
+      context: .
+      args:
+        VERSION: 0.1.0
+    container_name: hindsight-proxy
+    restart: unless-stopped
+    ports:
+      # Bound to loopback by default. The agents reach it through the same
+      # reverse proxy that fronts Hindsight, not over the LAN.
+      - "127.0.0.1:8890:8890"
+    environment:
+      LISTEN_ADDR: ":8890"
+      CONFIG_PATH: /etc/hindsight-proxy/tokens.json
+      HINDSIGHT_URL: "http://hindsight-api:8888"
+      # Supplied out of band; never committed.
+      HINDSIGHT_TOKEN: "${HINDSIGHT_TOKEN:?set HINDSIGHT_TOKEN in .env}"
+      LOG_LEVEL: "info"
+    volumes:
+      - ./tokens.json:/etc/hindsight-proxy/tokens.json:ro
+    networks:
+      - hindsight
+    # The container has no shell and no package manager, so health is checked
+    # with the binary's own probe.
+    healthcheck:
+      test: ["CMD", "/hindsight-proxy", "-healthcheck", "-healthcheck-url", "http://127.0.0.1:8890/healthz"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          # Well under Hindsight's own 1.5G ceiling; this process only proxies.
+          memory: 128M
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  # Pre-existing network the hindsight-api container is already attached to.
+  # Create it once if it does not exist, or rename to match the deployment.
+  hindsight:
+    external: true
