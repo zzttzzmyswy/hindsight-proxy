@@ -80,6 +80,14 @@ deployment.
 - **`document_id` upserts.** The same key is written twice, 8891 then 8890, and
   the bank ends up with one document under that key and no memory left over
   from the first value -- so an agent can correct a fact with no delete tool.
+- **`document_id` is namespaced per agent.** Two callers share one bank and write
+  the same key; the bank ends up holding two documents, `<agentA>/<key>` and
+  `<agentB>/<key>`, with both contents present. One of the two agent names
+  contains Chinese characters and parentheses, which also establishes that
+  upstream accepts a namespaced id of that shape. Agent A then writes the
+  prefixed id recall handed back, and the bank still holds exactly two
+  documents: A's own replaced in place, with no nested `A/A/...` id, and B's
+  untouched. Confirmed at the storage layer by document id and content hash.
 - **The tool surface fits its budget.** See the three readings below.
 
 ### Two things to know when reproducing this
@@ -121,8 +129,9 @@ annotations are added by the SDK at serialization time:
 | + tool names (`ToolSurfaceSize()`, what `make check` enforces) | 2799 | under |
 | actual `tools/list` bytes on the wire | 3551 | over |
 
-v0.1.4 added 110 to each reading (advertising `document_id` on `retain`); the
-figures above are current, and v0.1.3 read 2626 / 2689 / 3441.
+v0.1.4 added 110 to each reading (advertising `document_id` on `retain`) and
+v0.1.5 changed nothing on the surface, so the figures above are current; v0.1.3
+read 2626 / 2689 / 3441.
 
 The annotations account for 421 of the difference. The first two readings pass;
 the third does not. The budget's purpose in the issue was to bound context

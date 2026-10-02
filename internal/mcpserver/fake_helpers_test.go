@@ -31,6 +31,27 @@ func (f *fakeHindsight) banksCreated() []string {
 	return out
 }
 
+// seedMemory puts a memory straight into a bank, bypassing the proxy.
+//
+// It stands in for content the proxy did not write: memories predating the
+// ownership tag, or written around the proxy by an operator. Those are the
+// entries a request-side tag filter cannot exclude, so the read-scope tests
+// need one -- and the routing table can no longer produce one, since a bank
+// named by two rules must name an agent on every one of them.
+func (f *fakeHindsight) seedMemory(bank, text string, tags []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.banks[bank]; !ok {
+		f.banks[bank] = nil
+	}
+	f.banks[bank] = append(f.banks[bank], storedMemory{
+		ID:   idFor(bank, len(f.banks[bank])),
+		Text: text,
+		Type: "world",
+		Tags: tags,
+	})
+}
+
 // memoriesIn returns the memories stored in a bank.
 func (f *fakeHindsight) memoriesIn(bank string) []storedMemory {
 	f.mu.Lock()

@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.1.5
+
+Namespace `document_id` under the writing agent, so two callers sharing a bank
+can no longer overwrite each other's documents. No change to routing, tag
+stripping/injection, read scope, bank auto-creation, or the tool surface.
+
+- `retain` now prefixes each item's `document_id` with `<agent>/`, the agent
+  name from the caller's routing rule. Reusing a key replaces your own document
+  and nobody else's: with a shared bank, agent A writing `env:port` and agent B
+  writing `env:port` produce `A/env:port` and `B/env:port`, where before the
+  second write replaced the first.
+- The prefix is applied whenever the rule names an agent, without checking
+  whether the bank is currently shared. A bank can gain a second caller while
+  the documents already written under it stay where they are, so a rule that
+  switched on "is this bank shared?" would rename the ids of everything written
+  before the change and strand them. One rule for every agent stays stable.
+- Idempotent: an id already carrying this caller's own prefix is used as-is, so
+  a `document_id` read back from recall can be written again to correct that
+  same document. An id carrying someone else's prefix gets this caller's prefix
+  on top (`A/B/x`), which is what keeps it out of `B`'s documents.
+- A rule with no `agent` forwards `document_id` unchanged, as in v0.1.4, and a
+  caller that sends no `document_id` still sends no such field.
+- Config validation gains two rules, both failing closed: an agent name may not
+  contain `/` (or agent `X` writing `Y/z` and agent `X/Y` writing `z` would
+  resolve to the same document), and a bank named by two or more rules must name
+  an agent on every one of them (nothing else namespaces the id). Startup
+  refuses the table; a hot reload keeps the previous one, as before.
+- Responses are unchanged: a `document_id` returned by recall or the documents
+  list comes back with its prefix, un-stripped, so it round-trips.
+- **Existing documents are not migrated.** A document written before this
+  release under a bare id is not reachable by writing that id again: the write
+  now lands on `<agent>/<id>` as a new document and the old one stays as it was.
+  Re-write the fact once under the prefixed id to move it. Nothing is deleted or
+  rewritten by the upgrade itself.
+- Tool surface: unchanged at 2799 (`ToolSurfaceSize()`); the parameter was
+  already advertised in v0.1.4 and nothing on the surface changed.
+- End-to-end script: new `document_id namespace` section, driving two agents on
+  one bank with the same key. One agent name carries Chinese and parentheses, so
+  the check also establishes that upstream accepts a namespaced id of that
+  shape. Run against a live Hindsight v0.10.2.
+
 ## v0.1.4
 
 Make the tool surface self-documenting: an agent now learns when to recall and

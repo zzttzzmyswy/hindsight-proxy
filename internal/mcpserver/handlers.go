@@ -135,6 +135,32 @@ func stripAgentTags(tags []string) []string {
 	return out
 }
 
+// scopedDocumentID namespaces a caller's document_id under its agent name so
+// two callers sharing a bank cannot replace each other's documents.
+//
+// The prefix is applied whenever the rule names an agent, not only when the bank
+// looks shared. The routing table is hot-reloadable: a bank that starts out
+// private can gain a second caller while the documents written under it stay
+// put, and a caller that began (or stopped) prefixing would no longer address
+// the document it meant to correct. One rule for every agent keeps both the
+// write path and the ids already in the store consistent.
+//
+// An id that already carries this caller's own prefix is returned unchanged, so
+// a document_id read back from recall or the documents list can be written
+// again to correct the same document. An id carrying someone else's prefix gets
+// this caller's prefix on top, which is what keeps it out of that caller's
+// documents.
+func scopedDocumentID(rule config.Rule, id string) string {
+	if id == "" || rule.Agent == "" {
+		return id
+	}
+	prefix := rule.Agent + "/"
+	if strings.HasPrefix(id, prefix) {
+		return id
+	}
+	return prefix + id
+}
+
 // mergeOwnTag appends the assigned ownership tag to caller tags, replacing any
 // previous agent tag (already stripped) with the authoritative one.
 func mergeOwnTag(tags []string, own string) []string {
@@ -374,7 +400,7 @@ func (s *Server) handleRetain(ctx context.Context, rule config.Rule, args map[st
 			Timestamp:  timestamp,
 			Tags:       mergeOwnTag(stripAgentTags(tags), own),
 			Metadata:   metadata,
-			DocumentID: documentID,
+			DocumentID: scopedDocumentID(rule, documentID),
 		})
 	}
 

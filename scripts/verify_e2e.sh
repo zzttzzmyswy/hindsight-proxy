@@ -40,6 +40,10 @@ BANK_FRESH="fresh-e2e-$RANDOM$RANDOM"
 # Bank for the document_id upsert check. Dedicated, so the probe's two writes can
 # be the only things in it and the "8891 is gone" assertion is unambiguous.
 BANK_UPSERT="upsert-e2e"
+# Bank for the document_id namespace check: two agents share it deliberately, so
+# the same key written by each has to stay a separate document. Dedicated, so
+# "this bank holds exactly two documents" is a statement about the probe.
+BANK_NS="ns-e2e"
 
 # Probe texts are written out in full and hashed as-is, so the storage-layer
 # check can find the document by content hash.
@@ -48,6 +52,11 @@ MARKER_BETA="E2E marker beta: the shared calendar is public."
 MARKER_FORGE="E2E forged-tag probe: the staging password is rotated monthly."
 MARKER_OWN="E2E own-scope probe: a private note about the quarterly review."
 MARKER_SCOPE_B="E2E shared-scope probe: a public note about the quarterly review."
+# Two contents for one document_id, so the namespace check can tell which agent's
+# document it is reading rather than only that two documents exist.
+MARKER_NS_A="E2E namespace probe A: the archive port is 7781."
+MARKER_NS_A2="E2E namespace probe A corrected: the archive port is 7782."
+MARKER_NS_B="E2E namespace probe B: the archive port is 7781 as well."
 
 # --write-config runs before the upstream token is needed, so the table can be
 # generated (and the proxy started) without one.
@@ -62,7 +71,9 @@ if [ "${1:-}" = "--write-config" ]; then
     "$(openssl rand -hex 24)": { "agent": "E2eOwn",   "bank": "$BANK_B",     "tools": "*", "read_scope": "own" },
     "$(openssl rand -hex 24)": { "agent": "E2eTrim",  "bank": "$BANK_B",     "tools": ["recall", "list_tags"] },
     "$(openssl rand -hex 24)": { "agent": "E2eSpare", "bank": "$BANK_SPARE", "tools": ["recall"] },
-    "$(openssl rand -hex 24)": { "agent": "E2eUpsert", "bank": "$BANK_UPSERT", "tools": "*" }
+    "$(openssl rand -hex 24)": { "agent": "E2eUpsert", "bank": "$BANK_UPSERT", "tools": "*" },
+    "$(openssl rand -hex 24)": { "agent": "E2eNsA", "bank": "$BANK_NS", "tools": "*" },
+    "$(openssl rand -hex 24)": { "agent": "E2e测试(a)", "bank": "$BANK_NS", "tools": "*" }
   }
 }
 EOF
@@ -78,13 +89,14 @@ UPSTREAM_TOKEN="${UPSTREAM_TOKEN:?set UPSTREAM_TOKEN to the Hindsight management
 # agent name, so the script and the proxy can never disagree about which token
 # means which bank. Positional indexing would break the moment a rule is added.
 # Two columns per agent: token, then bank.
-read -r TOKEN_A BANK_A TOKEN_B BANK_B TOKEN_FRESH BANK_FRESH TOKEN_OWN _ TOKEN_TRIM _ TOKEN_SPARE BANK_SPARE TOKEN_UPSERT _ < <(
+read -r TOKEN_A BANK_A TOKEN_B BANK_B TOKEN_FRESH BANK_FRESH TOKEN_OWN _ TOKEN_TRIM _ TOKEN_SPARE BANK_SPARE TOKEN_UPSERT _ TOKEN_NS_A _ TOKEN_NS_B _ < <(
   python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
 by_agent={e["agent"]:(t,e) for t,e in d["tokens"].items()}
 cells=[]
-for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare","E2eUpsert"):
+for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare","E2eUpsert",
+              "E2eNsA","E2e测试(a)"):
     if agent not in by_agent:
         print("missing rule for agent %s; regenerate with --write-config" % agent, file=sys.stderr)
         sys.exit(2)
@@ -93,7 +105,7 @@ for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare","E2e
 print("\t".join(cells))
 ' "$ROUTING_FILE"
 )
-if [ -z "${TOKEN_SPARE:-}" ] || [ -z "${BANK_FRESH:-}" ] || [ -z "${TOKEN_UPSERT:-}" ]; then
+if [ -z "${TOKEN_SPARE:-}" ] || [ -z "${BANK_FRESH:-}" ] || [ -z "${TOKEN_UPSERT:-}" ] || [ -z "${TOKEN_NS_A:-}" ]; then
   echo "$ROUTING_FILE is not the table this script expects; regenerate it with --write-config" >&2
   exit 2
 fi
@@ -146,6 +158,30 @@ for i in d.get("items", []):
     if i.get("content_hash") == want:
         print(json.dumps(i.get("tags") or []))
         break
+' "$want"
+}
+
+# doc_ids <bank> -> every document id in the bank, one per line.
+doc_ids() {
+  upstream "/v1/default/banks/$1/documents" | python3 -c '
+import json,sys
+for i in json.load(sys.stdin).get("items") or []:
+    print(i.get("id") or "")
+'
+}
+
+# doc_exists <bank> <exact submitted text> -> yes when the bank holds a document
+# whose content hash matches that text. Keyed on the hash rather than a text
+# search for the reason doc_tags gives: extraction rewrites the text it derives,
+# so the submitted text is not findable as a memory.
+doc_exists() {
+  local bank="$1" text="$2" want
+  want=$(printf '%s' "$text" | sha256sum | awk '{print $1}')
+  upstream "/v1/default/banks/$bank/documents" | python3 -c '
+import json,sys
+want = sys.argv[1]
+d = json.load(sys.stdin)
+print("yes" if any(i.get("content_hash") == want for i in d.get("items") or []) else "no")
 ' "$want"
 }
 
@@ -513,6 +549,72 @@ check "the superseded value 8891 is gone from the bank" "${stale:-0}" "0"
 current=$(texts_matching "$BANK_UPSERT" "8890" | grep -c . || true)
 check "the corrected value 8890 is present" \
   "$([ "${current:-0}" -gt 0 ] && echo yes || echo no)" "yes"
+
+echo "== document_id namespace: two agents on one bank cannot replace each other =="
+# The point of the prefix. Both callers below share BANK_NS and write the SAME
+# document_id. Before the prefix the second write upserted the first away, so
+# agent A's fact disappeared because agent B happened to pick the same key.
+#
+# One of the two agent names carries Chinese and parentheses on purpose: the
+# prefix becomes part of a document id, and the id goes through the upstream
+# API unchanged, so an id shape upstream rejects would be a failure of the
+# scheme rather than of this check.
+NS_KEY="env:e2e-ns-port"
+tool "$TOKEN_NS_A" retain "{\"items\":[{\"content\":\"$MARKER_NS_A\",\"document_id\":\"$NS_KEY\"}]}" >/dev/null
+tool "$TOKEN_NS_B" retain "{\"items\":[{\"content\":\"$MARKER_NS_B\",\"document_id\":\"$NS_KEY\"}]}" >/dev/null
+
+# Wait on the storage layer for both documents, not on extraction: the claim is
+# about which documents exist, and the documents endpoint answers that directly.
+ns_ids=""
+for _ in $(seq 1 15); do
+  ns_ids=$(doc_ids "$BANK_NS")
+  [ "$(printf '%s\n' "$ns_ids" | grep -c . || true)" -ge 2 ] && break
+  sleep 2
+done
+note "documents in $BANK_NS: $(printf '%s' "$ns_ids" | tr '\n' ' ')"
+check "each agent's document exists under its own namespaced id" \
+  "$(printf '%s\n' "$ns_ids" | grep -cx "E2eNsA/$NS_KEY")" "1"
+check "the second agent's id keeps its Chinese-and-parenthesis name" \
+  "$(printf '%s\n' "$ns_ids" | grep -cx "E2e测试(a)/$NS_KEY")" "1"
+# Two, not three: an id that got double-prefixed would show up here as a stray.
+check "the bank holds exactly the two namespaced documents" \
+  "$(printf '%s\n' "$ns_ids" | grep -c . || true)" "2"
+check "agent A's content is still in the bank" "$(doc_exists "$BANK_NS" "$MARKER_NS_A")" "yes"
+check "agent B's content is still in the bank" "$(doc_exists "$BANK_NS" "$MARKER_NS_B")" "yes"
+
+# Now agent A corrects its own fact by writing back the id it got from recall --
+# already carrying its prefix. It must land on A's existing document, leaving
+# B's untouched: one document replaced in place, not a second one created.
+#
+# document_id reaches a caller on a derived memory, and extraction is
+# asynchronous, so the recall is retried until it carries one. This is the read
+# half of the idempotence contract: the proxy has to hand back the prefixed id,
+# or an agent can never address the document it wrote.
+seen_id=""
+for _ in $(seq 1 30); do
+  seen_id=$(tool "$TOKEN_NS_A" recall '{"query":"archive port"}' | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+ids={r.get("document_id") for r in (d.get("results") or []) if r.get("document_id")}
+print("E2eNsA/" + sys.argv[1] if ("E2eNsA/" + sys.argv[1]) in ids else (sorted(ids)[0] if ids else ""))
+' "$NS_KEY")
+  [ -n "$seen_id" ] && break
+  sleep 2
+done
+check "recall hands back the already-namespaced document_id" "$seen_id" "E2eNsA/$NS_KEY"
+
+tool "$TOKEN_NS_A" retain "{\"items\":[{\"content\":\"$MARKER_NS_A2\",\"document_id\":\"$seen_id\"}]}" >/dev/null
+settled_ns=$(settle "$BANK_NS" "$seen_id" 30)
+note "document $seen_id settled at $settled_ns derived memories"
+
+ns_ids_after=$(doc_ids "$BANK_NS")
+check "correcting A's fact did not create a nested id" \
+  "$(printf '%s\n' "$ns_ids_after" | grep -c "E2eNsA/E2eNsA/" || true)" "0"
+check "the bank still holds exactly two documents" \
+  "$(printf '%s\n' "$ns_ids_after" | grep -c . || true)" "2"
+check "A's corrected content is in the bank" "$(doc_exists "$BANK_NS" "$MARKER_NS_A2")" "yes"
+check "B's document is untouched" "$(doc_exists "$BANK_NS" "$MARKER_NS_B")" "yes"
+check "the superseded A content is gone" "$(doc_exists "$BANK_NS" "$MARKER_NS_A")" "no"
 
 echo
 printf 'passed %d, failed %d, skipped %d\n' "$pass" "$fail" "$skip"

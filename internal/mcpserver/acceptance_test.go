@@ -12,16 +12,20 @@ import (
 )
 
 // routingTable is the shared fixture: two callers on two banks, a caller scoped
-// to its own writes, a caller with a trimmed tool list, and a caller with no
-// agent name whose writes therefore carry no ownership tag.
+// to its own writes, and a caller with a trimmed tool list.
+//
+// The no-agent caller sits on a bank of its own. It cannot share one: the loader
+// rejects a bank named by two rules unless both name an agent, because an agent
+// is what document_id is namespaced under.
 const routingTable = `{
   "default_bank": "shared",
   "tokens": {
     "token-alpha":  {"agent": "Mika",   "bank": "ops",    "tools": "*"},
     "token-beta":   {"agent": "Riven",  "bank": "shared", "tools": "*"},
     "token-own":    {"agent": "Solo",   "bank": "shared", "read_scope": "own", "tools": "*"},
-    "token-legacy": {"bank": "shared", "tools": "*"},
-    "token-trim":   {"agent": "Narrow", "bank": "shared", "tools": ["recall", "list_tags"]}
+    "token-legacy": {"bank": "legacy", "tools": "*"},
+    "token-trim":   {"agent": "Narrow", "bank": "shared", "tools": ["recall", "list_tags"]},
+    "token-multi":  {"agent": "Multi",  "bank": "shared", "tools": "*"}
   }
 }`
 
@@ -175,12 +179,15 @@ func TestReadScopeOwnHidesOtherWritersInTheSameBank(t *testing.T) {
 	}); isErr {
 		t.Fatal("seed from the tagged caller failed")
 	}
-	// The legacy caller has no agent, so its writes carry no ownership tag.
-	if _, isErr := s.callTool("token-legacy", "retain", map[string]any{
-		"items": []any{map[string]any{"content": "untagged legacy note"}},
-	}); isErr {
-		t.Fatal("seed from the untagged caller failed")
-	}
+	// A memory nothing in this proxy wrote: no ownership tag at all. Seeded
+	// straight into the store because the routing table can no longer express
+	// it -- a bank named by two rules must name an agent on each, so there is
+	// no configured caller left that would write untagged. Memories like this
+	// still exist in a bank that predates the rule (or was written around the
+	// proxy), and upstream's "any" tag matching returns them for any filter,
+	// which is why own-scope has to filter the response rather than trust the
+	// request.
+	s.fake.seedMemory("shared", "untagged legacy note", nil)
 
 	// Solo is on the same bank but scoped to its own writes.
 	text, isErr := s.callTool("token-own", "recall", map[string]any{"query": "note"})
@@ -250,11 +257,9 @@ func TestReadScopeOwnAppliesToListingAndGet(t *testing.T) {
 	}); isErr {
 		t.Fatal("seed failed")
 	}
-	if _, isErr := s.callTool("token-legacy", "retain", map[string]any{
-		"items": []any{map[string]any{"content": "untagged browseable note"}},
-	}); isErr {
-		t.Fatal("seed failed")
-	}
+	// Seeded rather than written through the proxy, for the reason given in the
+	// recall test above: no configured caller writes untagged any more.
+	s.fake.seedMemory("shared", "untagged browseable note", nil)
 
 	listing, isErr := s.callTool("token-own", "list_memories", map[string]any{})
 	if isErr {
@@ -381,6 +386,10 @@ func TestInitializeInstructionsCarryRoutingAndUsageProtocol(t *testing.T) {
 // way an agent can fix a fact that has changed: the proxy exposes no delete
 // tool, by design, so an outdated fact would otherwise accumulate beside its
 // replacement forever.
+//
+// The id reaches upstream namespaced under the caller's agent. That is what lets
+// the upsert be used on a shared bank: without the prefix, two agents agreeing on
+// a key would replace each other's documents.
 func TestRetainPassesDocumentIDUpstream(t *testing.T) {
 	s := newTestServer(t, routingTable)
 
@@ -401,8 +410,11 @@ func TestRetainPassesDocumentIDUpstream(t *testing.T) {
 	if got == nil {
 		t.Fatal("document_id was dropped before the request reached upstream")
 	}
-	if *got != "env:nas-hindsight-port" {
-		t.Fatalf("upstream received document_id %q, want %q", *got, "env:nas-hindsight-port")
+	// Namespaced under the caller's agent: the id the caller asked for is kept
+	// as the tail, so the same key written by another agent is a different
+	// document rather than a replacement.
+	if *got != "Mika/env:nas-hindsight-port" {
+		t.Fatalf("upstream received document_id %q, want %q", *got, "Mika/env:nas-hindsight-port")
 	}
 }
 
@@ -469,6 +481,79 @@ func TestRetainSchemaAdvertisesDocumentID(t *testing.T) {
 		return
 	}
 	t.Fatal("retain is missing from tools/list")
+}
+
+// --- document_id is namespaced under the writing agent -------------------------
+
+// Two agents on one bank writing the same document_id must produce two distinct
+// documents, each namespaced under its own writer. This is the whole point of
+// the change: before it, the second write replaced the first.
+//
+// The bank is shared and both callers are on it, which is the configuration the
+// loader demands an agent for.
+func TestTwoAgentsSharingABankDoNotCollideOnDocumentID(t *testing.T) {
+	s := newTestServer(t, routingTable)
+
+	const key = "env:shared-port"
+	for _, w := range []struct{ token, content string }{
+		{betaToken, "the shared port is 8891"},
+		{"token-multi", "the shared port is 8892"},
+	} {
+		if text, isErr := s.callTool(w.token, "retain", map[string]any{
+			"items": []any{map[string]any{"content": w.content, "document_id": key}},
+		}); isErr {
+			t.Fatalf("retain as %s failed: %s", w.token, text)
+		}
+	}
+
+	writes := s.fake.writesTo("shared")
+	if len(writes) != 2 {
+		t.Fatalf("upstream saw %d writes, want 2", len(writes))
+	}
+	first, second := writes[0].Items[0].DocumentID, writes[1].Items[0].DocumentID
+	if first == nil || second == nil {
+		t.Fatalf("a document_id was dropped: %v, %v", first, second)
+	}
+	if *first == *second {
+		t.Fatalf("both agents wrote document_id %q; the second would replace the first", *first)
+	}
+	// Not just different: each is its own agent's namespace plus the key the
+	// caller asked for, so neither can reach the other's document.
+	if *first != "Riven/"+key {
+		t.Fatalf("upstream received %q, want %q", *first, "Riven/"+key)
+	}
+	if *second != "Multi/"+key {
+		t.Fatalf("upstream received %q, want %q", *second, "Multi/"+key)
+	}
+}
+
+// A caller that already holds a namespaced id -- as recall returns it -- must be
+// able to write it back to correct that document rather than creating a nested
+// one. Without this the correction path the upsert exists for would be
+// unreachable on a namespaced id.
+func TestRetainIsIdempotentOnAnAlreadyNamespacedID(t *testing.T) {
+	s := newTestServer(t, routingTable)
+
+	for _, content := range []string{"the ops port is 8891", "the ops port is 8890"} {
+		if text, isErr := s.callTool(alphaToken, "retain", map[string]any{
+			"items": []any{map[string]any{
+				"content":     content,
+				"document_id": "Mika/env:nas-hindsight-port",
+			}},
+		}); isErr {
+			t.Fatalf("retain failed: %s", text)
+		}
+	}
+
+	writes := s.fake.writesTo("ops")
+	if len(writes) != 2 {
+		t.Fatalf("upstream saw %d writes, want 2", len(writes))
+	}
+	for i, w := range writes {
+		if got := w.Items[0].DocumentID; got == nil || *got != "Mika/env:nas-hindsight-port" {
+			t.Fatalf("write %d carried document_id %v, want Mika/env:nas-hindsight-port", i, got)
+		}
+	}
 }
 
 // --- Acceptance 5: the routing table hot-reloads -------------------------------

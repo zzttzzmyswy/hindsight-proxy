@@ -59,13 +59,14 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 | --- | --- | --- |
 | `default_bank` | 否 | 仅用于省略 `bank` 的条目。**未知 token 不会回落到它**（fail-closed）。 |
 | `tokens.<token>` | 是 | 入站 `Authorization: Bearer <token>` 的凭据本身。 |
-| `.agent` | 否 | 注入的归属 tag 名，形如 `agent:<agent>`。省略则该调用方写入不带归属 tag，且不能用 `read_scope: "own"`。 |
+| `.agent` | 否 | 注入的归属 tag 名，形如 `agent:<agent>`；同时是 `document_id` 的前缀（见下）。省略则该调用方写入不带归属 tag，不能用 `read_scope: "own"`，且**不能与别人共用同一个 bank**。名字里不得含 `/`。 |
 | `.bank` | 否 | 目标 bank。省略则取 `default_bank`。 |
 | `.tools` | 是 | `"*"` 表示不裁剪，或工具名数组。 |
 | `.read_scope` | 否 | `"shared"`（默认，看整个 bank）或 `"own"`（只看自己写的）。 |
 | `.description` | 否 | 仅文档用，会写进启动日志。 |
 
-配置非法（未知工具名、非法 bank id、`own` 但无 `agent`、空表）时**启动即失败**，运行中改坏则保留上一份可用配置并打 error 日志。
+配置非法（未知工具名、非法 bank id、`own` 但无 `agent`、`agent` 含 `/`、共享 bank 里有规则缺
+`agent`、空表）时**启动即失败**，运行中改坏则保留上一份可用配置并打 error 日志。
 
 ### 环境变量
 
@@ -114,7 +115,8 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 
 上表是**紧凑序列化**（`json.Marshal` 默认，即代理实际发出的字节）。若用 Python
 默认的带空格分隔符统计，前两档会变成 **2916 / 2979**——数字不同但 payload 完全相同，
-只是分隔符；引用数字时请注明口径。（v0.1.4 的 `document_id` 让紧凑三档各 +110 字符。）
+只是分隔符；引用数字时请注明口径。（v0.1.4 的 `document_id` 让紧凑三档各 +110 字符；v0.1.5
+没有改动工具面，数字与 v0.1.4 相同。）
 
 前两个口径**低于 3000**；第三个（含 MCP safety annotations）**高于 3000**。annotations 由 MCP SDK
 在序列化时补全（`readOnlyHint` / `additiveHint` / `openWorldHint` / `idempotentHint`），每个工具约 66–91
@@ -147,6 +149,46 @@ memory 被清掉），而不是并排再堆一条。
 
 不带 `document_id` 时该字段不会发到上游（`omitempty`），一次写入就是一个新 document——
 所以代理不会替调用方凭空造一个键，否则所有无键写入会塌到同一个 document 上。
+
+#### 前缀规则：`document_id` 会按 agent 加命名空间
+
+代理在出站前给每个 `document_id` 加上 `"<agent>/"` 前缀，`<agent>` 就是路由表里该调用方的
+`agent` 字段原文。带前缀后，同一个 bank 里不同 agent 用同一个键也不会互相覆盖：
+
+| 调用方 | 传入 `document_id` | 上游实际收到的 id |
+| --- | --- | --- |
+| agent `A` | `env:port` | `A/env:port` |
+| agent `B` | `env:port` | `B/env:port` |
+
+两者是两个 document，各写各的。**规则没有配 `agent` 时前缀不加**，`document_id` 原样转发
+（与 v0.1.4 相同）。
+
+**为什么一律加前缀，而不是只在 bank 共享时才加**：路由表支持热加载。一个 bank 今天是私有的，
+明天加第二个调用方，如果前缀跟着「当前是否共享」变，那么第一个 agent 早先写入的那些 id 的规则
+就变了，之后的更新对不上旧记录。始终加前缀，行为才稳定。
+
+**幂等**：调用方传入的 id 如果已经以本调用方的 `"<agent>/"` 开头，就原样使用。所以 recall 返回的
+（已带前缀的）`document_id` 可以原样再写回去更正同一条记忆，而不会变成 `A/A/env:port`。
+
+**拿别人的 id 写不进去**：传入以别人前缀开头的 id（如 `B/x`）会照常加上本调用方前缀，变成
+`A/B/x`，因此写不到 B 的 document 上。
+
+**响应不剥离前缀**：recall、list 等返回的 `document_id` 带着前缀原样返回，不做剥离。
+
+**配置校验**（加载映射表时，失败则启动报错退出 / 热加载保留上一份）：
+
+- `agent` 名**不得包含 `/`**。否则 agent `X` 写 `Y/z` 与 agent `X/Y` 写 `z` 会得到同一个 id
+  `X/Y/z`。
+- 同一个 `bank` 被 **2 条及以上规则引用**时，这些规则**都必须配 `agent`**。没有 agent 名字就没有
+  东西可以加前缀，那个写入方仍可能覆盖别人的记忆（`default_bank` 算共享，同样适用）。
+
+#### 存量影响：升级不会迁移已有 document
+
+升级前写入的、id 没有前缀的 document **不会**被迁移或改写，也不会被删除。升级后用同一个 id 再写，
+会生成一个新的带前缀 document，**旧的那份不会被替换，两份并存**。
+
+要把某个事实搬到带前缀的 id 下：用原来的键重写一次内容即可，之后就一直用新 id（recall 返回的就是
+它）。旧 document 需要清理时，代理**没有删除工具**，只能在上游按 id 处理。
 
 ## 记忆用法协议（由代理的 MCP instructions 下发）
 
@@ -219,6 +261,11 @@ token** 等落库（`GET /v1/default/banks/{bank}/memories/list` 直到目标 ta
 调用方 token 不会被转发给上游（`TestCallerTokenIsNeverForwardedUpstream`）、
 `retain` 的 `document_id` 透传与 `omitempty`（`TestRetainPassesDocumentIDUpstream`、
 `TestRetainOmitsDocumentIDWhenNotGiven`、`TestRetainSchemaAdvertisesDocumentID`）、
+`document_id` 的 agent 命名空间（`TestScopedDocumentIDNamespacesUnderTheAgent`、
+`TestTwoAgentsSharingABankDoNotCollideOnDocumentID`、
+`TestRetainIsIdempotentOnAnAlreadyNamespacedID`）、
+共享 bank 的配置校验（`TestLoadAcceptsASharedBankWhenEveryRuleNamesAnAgent` 及
+`TestLoadRejectsBadConfigs` 中的 `agent name with a slash` / `shared bank …` 各条）、
 用法协议随握手下发（`TestInitializeInstructionsCarryRoutingAndUsageProtocol`）。
 
 ```bash
