@@ -10,11 +10,11 @@ services:
     # registry. Run `docker compose up -d --build` so the tag is produced from
     # the source in this directory. Change the name to whatever your registry
     # uses if you decide to publish one.
-    image: hindsight-proxy:0.1.4
+    image: hindsight-proxy:0.1.5
     build:
       context: .
       args:
-        VERSION: 0.1.4
+        VERSION: 0.1.5
     container_name: hindsight-proxy
     restart: unless-stopped
     ports:

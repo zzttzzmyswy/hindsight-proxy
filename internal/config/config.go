@@ -166,7 +166,11 @@ func (f *File) build(path string, knownTool func(string) bool) (*Config, error) 
 	}
 
 	rules := make([]Rule, 0, len(f.Tokens))
-	seenBank := map[string]string{}
+	// bankRefs records every token routed to a bank, in load order, so a bank
+	// can be checked once every rule that names it has been seen. Map iteration
+	// order is random, so the rule that reveals a conflict is not knowable while
+	// walking the tokens.
+	bankRefs := map[string][]bankRef{}
 	for token, e := range f.Tokens {
 		if strings.TrimSpace(token) == "" {
 			return nil, fmt.Errorf("%s: empty token key", path)
@@ -196,6 +200,14 @@ func (f *File) build(path string, knownTool func(string) bool) (*Config, error) 
 			return nil, fmt.Errorf("%s: token %s: agent name %q is not usable in an agent:<name> tag",
 				path, redact(token), e.Agent)
 		}
+		if strings.Contains(e.Agent, "/") {
+			// The agent name is the document_id namespace prefix, so a slash in
+			// it would let two different rules address the same document: agent
+			// "X" writing "Y/z" and agent "X/Y" writing "z" both resolve to
+			// "X/Y/z".
+			return nil, fmt.Errorf("%s: token %s: agent name %q must not contain %q, which separates it from the document_id it prefixes",
+				path, redact(token), e.Agent, "/")
+		}
 		if !e.Tools.All() {
 			if len(e.Tools.Names()) == 0 {
 				return nil, fmt.Errorf("%s: token %s: tools list is empty; use %q to allow every tool",
@@ -208,11 +220,7 @@ func (f *File) build(path string, knownTool func(string) bool) (*Config, error) 
 			}
 		}
 
-		if other, dup := seenBank[bank]; dup && other != token {
-			// Not an error: several callers may legitimately share a bank.
-			slog.Debug("bank shared by multiple tokens", "bank", bank)
-		}
-		seenBank[bank] = token
+		bankRefs[bank] = append(bankRefs[bank], bankRef{token: token, agent: e.Agent})
 
 		rules = append(rules, Rule{
 			Agent:       e.Agent,
@@ -223,7 +231,43 @@ func (f *File) build(path string, knownTool func(string) bool) (*Config, error) 
 			tokenHash:   sha256.Sum256([]byte(token)),
 		})
 	}
+
+	if err := checkSharedBanks(path, bankRefs); err != nil {
+		return nil, err
+	}
 	return &Config{DefaultBank: f.DefaultBank, rules: rules}, nil
+}
+
+// bankRef is one token routed to a bank, kept so the bank can be checked once
+// every rule naming it has been seen.
+type bankRef struct {
+	token string
+	agent string
+}
+
+// checkSharedBanks requires every caller on a shared bank to name an agent.
+//
+// Sharing a bank is what makes a bare document_id dangerous: without an agent
+// name the proxy cannot namespace the id, so one caller's write can replace
+// another's document. Rejecting the table is the fail-closed choice, and it is
+// checked here rather than inline because map iteration order is random -- the
+// rule that would reveal the conflict is not known while walking the tokens.
+func checkSharedBanks(path string, bankRefs map[string][]bankRef) error {
+	for bank, refs := range bankRefs {
+		if len(refs) < 2 {
+			continue
+		}
+		// Not an error here: callers may legitimately share a bank, and with an
+		// agent on each rule the document_id namespace keeps their writes apart.
+		slog.Debug("bank shared by multiple tokens", "bank", bank, "tokens", len(refs))
+		for _, ref := range refs {
+			if ref.agent == "" {
+				return fmt.Errorf("%s: bank %q is shared by %d tokens, so every one of them must configure an agent; token %s has none",
+					path, bank, len(refs), redact(ref.token))
+			}
+		}
+	}
+	return nil
 }
 
 // Lookup resolves a bearer token to its rule. It walks every rule without

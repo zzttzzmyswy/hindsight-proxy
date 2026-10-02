@@ -125,6 +125,19 @@ func TestLoadRejectsBadConfigs(t *testing.T) {
 		"unknown field":       `{"default_bank":"b","tokens":{"t":{"agent":"A","tools":"*","scope":"own"}}}`,
 		"empty token key":     `{"default_bank":"b","tokens":{"  ":{"agent":"A","tools":"*"}}}`,
 		"not json":            `{`,
+		// An agent name is the document_id namespace prefix, so a slash in it
+		// would let two rules address one document: agent "X" writing "Y/z" and
+		// agent "X/Y" writing "z" both resolve to X/Y/z.
+		"agent name with a slash":    `{"default_bank":"b","tokens":{"t":{"agent":"X/Y","tools":"*"}}}`,
+		"agent name that is a slash": `{"default_bank":"b","tokens":{"t":{"agent":"/","tools":"*"}}}`,
+		// Sharing a bank is what makes a bare document_id dangerous, and a
+		// caller with no agent has nothing to namespace under.
+		"shared bank with an agentless caller": `{"default_bank":"b","tokens":{
+			"t1":{"agent":"A","bank":"b","tools":"*"},
+			"t2":{"bank":"b","tools":"*"}}}`,
+		"shared bank where every caller is agentless": `{"default_bank":"b","tokens":{
+			"t1":{"bank":"b","tools":"*"},
+			"t2":{"bank":"b","tools":"*"}}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -132,6 +145,37 @@ func TestLoadRejectsBadConfigs(t *testing.T) {
 				t.Fatalf("Load accepted an invalid config (%s)", name)
 			}
 		})
+	}
+}
+
+// A bank may be shared as long as every rule naming it carries an agent: the
+// agent is what document_id is namespaced under, so each caller's writes stay
+// addressable on their own. The default bank counts as shared too, which is the
+// case a per-token check alone would walk straight past.
+func TestLoadAcceptsASharedBankWhenEveryRuleNamesAnAgent(t *testing.T) {
+	body := `{"default_bank":"b","tokens":{
+		"t1":{"agent":"A","bank":"b","tools":"*"},
+		"t2":{"agent":"B","bank":"b","tools":"*"},
+		"t3":{"agent":"C","tools":"*"}}}`
+	cfg, err := Load(write(t, body), known)
+	if err != nil {
+		t.Fatalf("Load rejected a shared bank whose rules all name an agent: %v", err)
+	}
+	for _, token := range []string{"t1", "t2", "t3"} {
+		rule, ok := cfg.Lookup(token)
+		if !ok {
+			t.Fatalf("token %q did not resolve", token)
+		}
+		if rule.Bank != "b" {
+			t.Fatalf("token %q routed to %q, want the shared bank b", token, rule.Bank)
+		}
+	}
+
+	// One caller alone on its bank may still go without an agent: nothing else
+	// can reach that bank, so there is no document to collide with.
+	alone := `{"default_bank":"b","tokens":{"t":{"bank":"solo","tools":"*"}}}`
+	if _, err := Load(write(t, alone), known); err != nil {
+		t.Fatalf("Load rejected a lone agentless caller on its own bank: %v", err)
 	}
 }
 
