@@ -217,8 +217,24 @@ func instructionsFor(rule config.Rule) string {
 		b.WriteString(rule.OwnTag())
 		b.WriteString(" by the proxy; do not send agent: tags yourself.")
 	}
+	// The usage protocol ships with the handshake rather than with each agent's
+	// own instructions: one place to maintain, and it applies to every caller
+	// already pointed at this proxy. Instructions do not count against the tool
+	// surface budget.
+	b.WriteString(" ")
+	b.WriteString(usageProtocol)
 	return b.String()
 }
+
+// usageProtocol tells an agent when to reach for the memory tools. It is fixed
+// text, identical for every caller: what varies per caller is the routing above,
+// not the protocol.
+const usageProtocol = "Usage: call recall with the task topic before starting work. " +
+	"Before finishing, retain facts worth knowing next time: user preferences, " +
+	"decisions and their reasons, environment facts (hosts, paths, versions), and " +
+	"pitfalls with their fixes. Do not retain transient progress, secrets, or tokens. " +
+	"Give facts that can change a stable document_id (e.g. \"env:nas-hindsight-port\") " +
+	"and reuse it when the fact changes."
 
 // ToolSurfaceSize is the serialized size in characters of the full tool surface,
 // used by the health endpoint to keep the surface within its budget.

@@ -105,16 +105,17 @@ var addOnly = func() *mcp.ToolAnnotations {
 var Registry = []ToolDef{
 	{
 		Name:        ToolRetain,
-		Description: "Store memories. Blocks until stored, so a later recall sees them. The proxy stamps ownership tags itself.",
+		Description: "Store durable facts. Blocks until stored. Reuse document_id to correct a fact instead of adding a conflicting one.",
 		Annotations: addOnly(),
 		Schema: obj(map[string]any{
 			"items": map[string]any{
 				"type": "array",
 				"items": obj(map[string]any{
-					"content":   str("The fact to remember."),
-					"context":   str("Category label."),
-					"timestamp": str("ISO 8601 event time."),
-					"tags":      strArray("Tags for later filtering."),
+					"content":     str("The fact to remember."),
+					"context":     str("Category label."),
+					"timestamp":   str("ISO 8601 event time."),
+					"tags":        strArray("Tags for later filtering."),
+					"document_id": str("Stable key. Reusing it replaces the earlier version."),
 				}, "content"),
 			},
 		}, "items"),
