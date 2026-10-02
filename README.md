@@ -108,13 +108,13 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 
 | 口径 | 字符数 | 说明 |
 | --- | --- | --- |
-| description + schema | 2626 | issue 验收标准 4 的字面口径 |
-| 再加工具名（`ToolSurfaceSize()`） | 2689 | 测试与 `make check` 用的口径，即上面这条加上 name |
-| `tools/list` 实际下发字节 | 3441 | 最接近 issue「控制上下文膨胀」本意的口径 |
+| description + schema | 2736 | issue 验收标准 4 的字面口径 |
+| 再加工具名（`ToolSurfaceSize()`） | 2799 | 测试与 `make check` 用的口径，即上面这条加上 name |
+| `tools/list` 实际下发字节 | 3551 | 最接近 issue「控制上下文膨胀」本意的口径 |
 
 上表是**紧凑序列化**（`json.Marshal` 默认，即代理实际发出的字节）。若用 Python
-默认的带空格分隔符统计，前两档会变成 **2801 / 2864**——数字不同但 payload 完全相同，
-只是分隔符；引用数字时请注明口径。
+默认的带空格分隔符统计，前两档会变成 **2916 / 2979**——数字不同但 payload 完全相同，
+只是分隔符；引用数字时请注明口径。（v0.1.4 的 `document_id` 让紧凑三档各 +110 字符。）
 
 前两个口径**低于 3000**；第三个（含 MCP safety annotations）**高于 3000**。annotations 由 MCP SDK
 在序列化时补全（`readOnlyHint` / `additiveHint` / `openWorldHint` / `idempotentHint`），每个工具约 66–91
@@ -123,7 +123,7 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 
 | 工具 | 说明 |
 | --- | --- |
-| `retain` | 写记忆。同步，返回即可查。 |
+| `retain` | 写记忆。同步，返回即可查。items 里可带 `document_id`，见下。 |
 | `recall` | 语义检索 |
 | `reflect` | 综合作答 |
 | `list_memories` | 平铺浏览（带分页上限） |
@@ -132,6 +132,39 @@ docker inspect --format '{{.State.Health.Status}}' hindsight-proxy   # 期望 he
 
 Hindsight 原生 36 个工具中的破坏性工具（`delete_bank` / `clear_memories` / `delete_document`）
 **不在本代理的表面上**：即使 token 配 `"tools": "*"` 也够不到，因为这些工具从未被注册。
+
+### `document_id`：更正一条已存的记忆
+
+`retain` 的每个 item 可带 `document_id`（稳定键，例如 `"env:nas-hindsight-port"`）。
+**同一个 `document_id` 再写一次会替换旧版本**（上游 upsert：库中只留一个 document，旧值派生出的
+memory 被清掉），而不是并排再堆一条。
+
+这是代理唯一的「更正」手段：按原设计**不暴露任何删除工具**，所以一条过时的事实如果没有稳定的
+`document_id`，就会和它的新版本一起被 recall 出来，越积越多。
+
+约定：**会变的事实**（端口、版本、路径等环境事实）给一个稳定键，值变了就用同一个键重写；
+**只增不改的事实**（决策、偏好、踩坑记录）不必给键。是否给键由 agent 判断，代理不强制。
+
+不带 `document_id` 时该字段不会发到上游（`omitempty`），一次写入就是一个新 document——
+所以代理不会替调用方凭空造一个键，否则所有无键写入会塌到同一个 document 上。
+
+## 记忆用法协议（由代理的 MCP instructions 下发）
+
+代理在 MCP `initialize` 握手的 `instructions` 字段里下发用法协议，内容是固定的英文段落
+（`internal/mcpserver/server.go` 的 `usageProtocol`），跟在按调用方生成的路由说明后面：
+
+> Usage: call recall with the task topic before starting work. Before finishing, retain facts
+> worth knowing next time: user preferences, decisions and their reasons, environment facts
+> (hosts, paths, versions), and pitfalls with their fixes. Do not retain transient progress,
+> secrets, or tokens. Give facts that can change a stable document_id (e.g.
+> "env:nas-hindsight-port") and reuse it when the fact changes.
+
+**为什么放这里**：接入本代理的 agent 各自的指令里都没有「何时调用 Hindsight」的说明，
+于是工具虽在却没有东西驱动 agent 去用（上线后某个 bank 长期是 0 条，直到测试才写入第一条）。
+放在代理的 `instructions` 里，所有已接入的 agent **一处生效**，不需要逐个改各家的 agent 指令；
+且 `instructions` 不计入工具面预算。
+
+调用方无需做任何事，任何 MCP 客户端握手时都会收到。
 
 ## 归属不可伪造
 
@@ -183,7 +216,10 @@ token** 等落库（`GET /v1/default/banks/{bank}/memories/list` 直到目标 ta
 （`TestReadScopeOwnHidesOtherWritersInTheSameBank`、
 `TestReadScopeTagFilterCannotBeWidenedByNamingAnotherAgent`）、
 破坏性工具不暴露（`TestDestructiveToolsAreNeverExposed`）、
-调用方 token 不会被转发给上游（`TestCallerTokenIsNeverForwardedUpstream`）。
+调用方 token 不会被转发给上游（`TestCallerTokenIsNeverForwardedUpstream`）、
+`retain` 的 `document_id` 透传与 `omitempty`（`TestRetainPassesDocumentIDUpstream`、
+`TestRetainOmitsDocumentIDWhenNotGiven`、`TestRetainSchemaAdvertisesDocumentID`）、
+用法协议随握手下发（`TestInitializeInstructionsCarryRoutingAndUsageProtocol`）。
 
 ```bash
 go test ./... -race
@@ -202,6 +238,9 @@ curl -s localhost:8890/healthz             # {"status":"ok","upstream":"ok","rul
 `/healthz` 在 Hindsight 不可达时返回 503 并说明原因；容器 healthcheck 用的就是它。
 
 要换上游 token：改环境变量后 `docker compose up -d` 重建容器（只有这一个值需要重启，路由表不用）。
+
+**记忆用法协议不需要部署动作**：它在 MCP 握手里下发，代理重启或不动都不影响——agent 每次
+握手都会拿到当前版本。改协议文本要改代码并发新版本（`usageProtocol` 是编译期常量）。
 
 ## 上游接口
 

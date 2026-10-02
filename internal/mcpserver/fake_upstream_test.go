@@ -45,6 +45,10 @@ type retainBody struct {
 		Content string   `json:"content"`
 		Tags    []string `json:"tags"`
 		Context string   `json:"context"`
+		// DocumentID is a pointer so a test can tell "the proxy omitted the
+		// field" from "the proxy sent an empty one", which is exactly what the
+		// omitempty behaviour has to be checked against.
+		DocumentID *string `json:"document_id"`
 	} `json:"items"`
 	Async bool `json:"async"`
 }

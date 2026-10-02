@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.4
+
+Make the tool surface self-documenting: an agent now learns when to recall and
+retain, and can correct a fact instead of accumulating contradictions. No change
+to routing, tag stripping/injection, read scope, or bank auto-creation.
+
+- The MCP handshake now carries the memory usage protocol in `instructions`,
+  appended to the existing per-caller routing text. None of the agents behind
+  this proxy has Hindsight guidance in its own instruction set, so the tools
+  were reachable but nothing prompted their use — a bank stayed at zero
+  memories until it was written to by hand. One place to maintain, effective
+  for every caller already pointed at the proxy, and `instructions` does not
+  count against the tool-surface budget.
+- `retain` advertises `document_id` on each item. The handler already forwarded
+  it and upstream already upserts on it, but an agent could not discover the
+  parameter, so a superseded fact could only pile up beside its replacement.
+  This is the only correction path by design: no delete tool is exposed.
+- A caller that omits `document_id` still sends no such field (`omitempty`), so
+  untagged writes are not collapsed onto one document.
+- Tool surface: 2799 characters (+110) on the `ToolSurfaceSize()` reading,
+  3551 (+110) on the wire-byte reading. The usage protocol in `instructions`
+  is not part of either figure.
+- End-to-end script: new `document_id upsert` section, and a handshake check
+  that `initialize` carries the usage protocol. Both were run against a live
+  Hindsight v0.10.2.
+
 ## v0.1.3
 
 Make the end-to-end script reproducible and re-runnable. No change to routing,

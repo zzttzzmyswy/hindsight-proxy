@@ -37,6 +37,9 @@ BANK_SPARE="spare-e2e"
 # Bank for the auto-create check. The id is generated when the table is written,
 # so it is absent at the start of a fresh run.
 BANK_FRESH="fresh-e2e-$RANDOM$RANDOM"
+# Bank for the document_id upsert check. Dedicated, so the probe's two writes can
+# be the only things in it and the "8891 is gone" assertion is unambiguous.
+BANK_UPSERT="upsert-e2e"
 
 # Probe texts are written out in full and hashed as-is, so the storage-layer
 # check can find the document by content hash.
@@ -58,7 +61,8 @@ if [ "${1:-}" = "--write-config" ]; then
     "$(openssl rand -hex 24)": { "agent": "E2eFresh", "bank": "$BANK_FRESH", "tools": "*" },
     "$(openssl rand -hex 24)": { "agent": "E2eOwn",   "bank": "$BANK_B",     "tools": "*", "read_scope": "own" },
     "$(openssl rand -hex 24)": { "agent": "E2eTrim",  "bank": "$BANK_B",     "tools": ["recall", "list_tags"] },
-    "$(openssl rand -hex 24)": { "agent": "E2eSpare", "bank": "$BANK_SPARE", "tools": ["recall"] }
+    "$(openssl rand -hex 24)": { "agent": "E2eSpare", "bank": "$BANK_SPARE", "tools": ["recall"] },
+    "$(openssl rand -hex 24)": { "agent": "E2eUpsert", "bank": "$BANK_UPSERT", "tools": "*" }
   }
 }
 EOF
@@ -74,13 +78,13 @@ UPSTREAM_TOKEN="${UPSTREAM_TOKEN:?set UPSTREAM_TOKEN to the Hindsight management
 # agent name, so the script and the proxy can never disagree about which token
 # means which bank. Positional indexing would break the moment a rule is added.
 # Two columns per agent: token, then bank.
-read -r TOKEN_A BANK_A TOKEN_B BANK_B TOKEN_FRESH BANK_FRESH TOKEN_OWN _ TOKEN_TRIM _ TOKEN_SPARE BANK_SPARE < <(
+read -r TOKEN_A BANK_A TOKEN_B BANK_B TOKEN_FRESH BANK_FRESH TOKEN_OWN _ TOKEN_TRIM _ TOKEN_SPARE BANK_SPARE TOKEN_UPSERT _ < <(
   python3 -c '
 import json,sys
 d=json.load(open(sys.argv[1]))
 by_agent={e["agent"]:(t,e) for t,e in d["tokens"].items()}
 cells=[]
-for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare"):
+for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare","E2eUpsert"):
     if agent not in by_agent:
         print("missing rule for agent %s; regenerate with --write-config" % agent, file=sys.stderr)
         sys.exit(2)
@@ -89,7 +93,7 @@ for agent in ("E2eAlpha","E2eBeta","E2eFresh","E2eOwn","E2eTrim","E2eSpare"):
 print("\t".join(cells))
 ' "$ROUTING_FILE"
 )
-if [ -z "${TOKEN_SPARE:-}" ] || [ -z "${BANK_FRESH:-}" ]; then
+if [ -z "${TOKEN_SPARE:-}" ] || [ -z "${BANK_FRESH:-}" ] || [ -z "${TOKEN_UPSERT:-}" ]; then
   echo "$ROUTING_FILE is not the table this script expects; regenerate it with --write-config" >&2
   exit 2
 fi
@@ -178,6 +182,78 @@ recall_count() {
   tool "$1" recall "{\"query\":\"$2\"}" 2>/dev/null \
     | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("results") or []))' 2>/dev/null \
     || echo 0
+}
+
+# texts_matching <bank> <regex> -> the stored memory texts containing a match.
+#
+# Extraction rewrites the probe text, so the search is over the derived
+# memories, which is the layer the upsert check has to hold at: the claim is
+# that the superseded fact is gone from what an agent can recall.
+texts_matching() {
+  upstream "/v1/default/banks/$1/memories/list?limit=200" | python3 -c '
+import json,re,sys
+pat = re.compile(sys.argv[1])
+for i in json.load(sys.stdin).get("items") or []:
+    t = i.get("text") or ""
+    if pat.search(t):
+        print(t.replace("\n", " "))
+' "$2"
+}
+
+# wait_for_text <bank> <regex> <tries> -> stop once a memory matches; prints the
+# count it settled on.
+wait_for_text() {
+  local n=0
+  for _ in $(seq 1 "$3"); do
+    n=$(texts_matching "$1" "$2" | grep -c . || true)
+    [ "${n:-0}" -gt 0 ] && break
+    sleep 2
+  done
+  echo "${n:-0}"
+}
+
+# settle <bank> <document-id> <tries> -> wait for the document's derived memory
+# count to stop moving, so an "is it gone yet" assertion does not race a
+# re-extraction triggered by the overwriting write.
+settle() {
+  local last=-1 cur=
+  for _ in $(seq 1 "$3"); do
+    cur=$(upstream "/v1/default/banks/$1/documents" | python3 -c '
+import json,sys
+for i in json.load(sys.stdin).get("items") or []:
+    if i.get("id") == sys.argv[1]:
+        print(i.get("memory_unit_count") or 0)
+        break
+else:
+    print(0)
+' "$2")
+    [ "$cur" = "$last" ] && [ "${cur:-0}" -gt 0 ] && break
+    last="$cur"
+    sleep 3
+  done
+  echo "${cur:-0}"
+}
+
+# wait_for_upsert <bank> <stale-regex> <fresh-regex> <tries> -> the number of
+# stale matches once the fresh value has landed and the stale one is gone, or
+# the stale count it gave up on.
+#
+# Two conditions, not one: the overwriting write re-extracts the document
+# asynchronously, so there is a window in which the old memories are still
+# present after the new ones appear. Waiting only for the fresh value to arrive
+# would read that window and report a false failure; waiting only for the stale
+# value to vanish would pass vacuously before anything was written. A run against
+# a bank an earlier run already filled starts with the stale value absent, so the
+# fresh-value half is what keeps this from passing before the extraction lands.
+wait_for_upsert() {
+  local stale=0 fresh=0
+  for _ in $(seq 1 "$4"); do
+    stale=$(texts_matching "$1" "$2" | grep -c . || true)
+    fresh=$(texts_matching "$1" "$3" | grep -c . || true)
+    [ "${fresh:-0}" -gt 0 ] && [ "${stale:-0}" -eq 0 ] && break
+    sleep 3
+  done
+  echo "${stale:-0}"
 }
 
 http_code() {
@@ -385,6 +461,58 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PROXY/mcp/$BANK_A" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 check "a bank named in the URL path is not routable" "$code" "404"
+
+echo "== the memory usage protocol is delivered in the MCP handshake =="
+# No agent pointed at this proxy carries Hindsight guidance in its own
+# instructions, so the handshake is the only place the protocol can come from.
+# It has to arrive alongside the caller's routing text, not instead of it.
+init=$(mcp "$TOKEN_B" initialize '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}')
+instructions=$(printf '%s' "$init" | python3 -c '
+import json,sys
+print(json.load(sys.stdin)["result"].get("instructions") or "")
+')
+case "$instructions" in
+  *"Usage: call recall"*) ok "initialize carries the usage protocol" ;;
+  *) bad "initialize instructions carry no usage protocol: $instructions" ;;
+esac
+case "$instructions" in
+  *"bank $BANK_B"*) ok "the routing sentence is still present" ;;
+  *) bad "the usage paragraph displaced the routing text: $instructions" ;;
+esac
+
+echo "== document_id upsert: reusing a key replaces the earlier version =="
+# This is the only way an agent can correct a fact: the proxy exposes no delete
+# tool by design, so without an upsert a superseded fact would sit beside its
+# replacement forever and both would be recalled.
+#
+# Ordered deliberately: write 8891, wait for its memories to exist, then
+# overwrite with 8890 and wait for that extraction to settle. Asserting "8891 is
+# gone" without waiting for the first extraction would pass vacuously -- nothing
+# had been written yet when the check ran.
+PORT_KEY="env:e2e-hindsight-port"
+tool "$TOKEN_UPSERT" retain "{\"items\":[{\"content\":\"The Hindsight port is 8891.\",\"document_id\":\"$PORT_KEY\"}]}" >/dev/null
+first=$(wait_for_text "$BANK_UPSERT" "8891" 30)
+check "the first version is stored and extractable" \
+  "$([ "${first:-0}" -gt 0 ] && echo yes || echo no)" "yes"
+
+tool "$TOKEN_UPSERT" retain "{\"items\":[{\"content\":\"The Hindsight port is 8890.\",\"document_id\":\"$PORT_KEY\"}]}" >/dev/null
+settled=$(settle "$BANK_UPSERT" "$PORT_KEY" 30)
+note "document $PORT_KEY settled at $settled derived memories"
+
+# One document, not two: the key is what the store replaced on, so a second
+# document surviving under the same id would mean the proxy had not passed it.
+docs=$(upstream "/v1/default/banks/$BANK_UPSERT/documents" | python3 -c '
+import json,sys
+key=sys.argv[1]
+print(len([i for i in json.load(sys.stdin).get("items") or [] if i.get("id") == key]))
+' "$PORT_KEY")
+check "one document exists under the reused key" "$docs" "1"
+
+stale=$(texts_matching "$BANK_UPSERT" "8891" | grep -c . || true)
+check "the superseded value 8891 is gone from the bank" "${stale:-0}" "0"
+current=$(texts_matching "$BANK_UPSERT" "8890" | grep -c . || true)
+check "the corrected value 8890 is present" \
+  "$([ "${current:-0}" -gt 0 ] && echo yes || echo no)" "yes"
 
 echo
 printf 'passed %d, failed %d, skipped %d\n' "$pass" "$fail" "$skip"

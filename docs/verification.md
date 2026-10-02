@@ -74,6 +74,12 @@ deployment.
   caller on the same bank sees everything.
 - **A missing bank is created on demand.** The bank is confirmed absent, a write
   routed to it succeeds, and the bank is confirmed present afterwards.
+- **The usage protocol arrives in the handshake.** `initialize` returns
+  `instructions` carrying the `Usage: call recall ...` paragraph, with the
+  per-caller routing sentence still in front of it.
+- **`document_id` upserts.** The same key is written twice, 8891 then 8890, and
+  the bank ends up with one document under that key and no memory left over
+  from the first value -- so an agent can correct a fact with no delete tool.
 - **The tool surface fits its budget.** See the three readings below.
 
 ### Two things to know when reproducing this
@@ -88,6 +94,15 @@ derived text is not the text that was submitted. Three consequences:
 - Storage-layer assertions avoid a text search entirely: they key on the
   document's `content_hash` (sha256 of the submitted text), because searching
   memories for a literal probe string fails even when the write succeeded.
+- **Extraction can also return zero facts, and then never retry.** Observed on a
+  local stack: the LLM answered with no extractable facts for a probe
+  (`Extract facts: 0 facts`), the document was stored with `memory_unit_count:
+  0`, and the consolidation task completed having processed nothing -- so the
+  pending queue drained and the document stayed empty forever. The `own`-scope
+  and upsert sections wait on the storage layer, so a probe that hits this shows
+  up as its wait timing out, not as a silent pass. Re-running the whole script
+  clears it (fresh probe texts, fresh documents); a rerun is worth trying before
+  investigating a failure in those two sections.
 - The `own`-scope check waits on the storage layer with the management token
   and reads through the proxy exactly once, after the data has settled. A wait
   implemented as a burst of reads through the proxy would make the result
@@ -102,9 +117,12 @@ annotations are added by the SDK at serialization time:
 
 | Reading | Characters | Against 3000 |
 | --- | --- | --- |
-| description + schema (the issue's wording) | 2626 | under |
-| + tool names (`ToolSurfaceSize()`, what `make check` enforces) | 2689 | under |
-| actual `tools/list` bytes on the wire | 3441 | over |
+| description + schema (the issue's wording) | 2736 | under |
+| + tool names (`ToolSurfaceSize()`, what `make check` enforces) | 2799 | under |
+| actual `tools/list` bytes on the wire | 3551 | over |
+
+v0.1.4 added 110 to each reading (advertising `document_id` on `retain`); the
+figures above are current, and v0.1.3 read 2626 / 2689 / 3441.
 
 The annotations account for 421 of the difference. The first two readings pass;
 the third does not. The budget's purpose in the issue was to bound context
@@ -114,7 +132,7 @@ are where the remaining fat is.
 
 These figures use compact JSON separators (`json.Marshal` defaults, which is what
 the proxy emits). Measuring the same payload with a pretty-printer's spaced
-separators gives 2801 / 2864 instead; the payload is identical, so quote the
+separators gives 2916 / 2979 instead; the payload is identical, so quote the
 serializer basis alongside the number. Both readings agree the wire bytes exceed
 3000.
 

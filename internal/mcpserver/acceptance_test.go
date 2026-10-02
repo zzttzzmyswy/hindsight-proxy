@@ -339,6 +339,138 @@ func TestToolSurfaceStaysWithinItsBudget(t *testing.T) {
 	}
 }
 
+// --- The memory usage protocol reaches the agent over the handshake ------------
+
+// The protocol cannot live in each agent's own instructions: the agents already
+// pointed at this proxy carry no Hindsight guidance of their own, so a tool they
+// are never told to call stays unused. It ships in the MCP handshake instead,
+// which every caller receives, and must not displace the per-caller routing
+// text it is appended to.
+func TestInitializeInstructionsCarryRoutingAndUsageProtocol(t *testing.T) {
+	s := newTestServer(t, routingTable)
+
+	resp := s.call(alphaToken, "initialize", map[string]any{
+		"protocolVersion": "2025-06-18",
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "test", "version": "0"},
+	})
+	var res struct {
+		Instructions string `json:"instructions"`
+	}
+	resp.decodeResult(t, &res)
+
+	if !strings.Contains(res.Instructions, "bank ops") {
+		t.Fatalf("instructions no longer name the caller's bank: %q", res.Instructions)
+	}
+	if !strings.Contains(res.Instructions, "Usage: call recall") {
+		t.Fatalf("instructions carry no usage protocol: %q", res.Instructions)
+	}
+	// Appended, not substituted: the routing sentence still comes first, and a
+	// single space separates the two.
+	if strings.Index(res.Instructions, "bank ops") > strings.Index(res.Instructions, "Usage: call recall") {
+		t.Fatalf("the usage protocol was prepended to the routing text: %q", res.Instructions)
+	}
+	if strings.Contains(res.Instructions, "  ") || strings.Contains(res.Instructions, ".\n") {
+		t.Fatalf("the appended paragraph is not separated by a single space: %q", res.Instructions)
+	}
+}
+
+// --- retain carries document_id so an agent can correct a fact in place -------
+
+// Reusing a document_id replaces the earlier version upstream, which is the only
+// way an agent can fix a fact that has changed: the proxy exposes no delete
+// tool, by design, so an outdated fact would otherwise accumulate beside its
+// replacement forever.
+func TestRetainPassesDocumentIDUpstream(t *testing.T) {
+	s := newTestServer(t, routingTable)
+
+	if text, isErr := s.callTool(alphaToken, "retain", map[string]any{
+		"items": []any{map[string]any{
+			"content":     "the hindsight port is 8891",
+			"document_id": "env:nas-hindsight-port",
+		}},
+	}); isErr {
+		t.Fatalf("retain failed: %s", text)
+	}
+
+	writes := s.fake.writesTo("ops")
+	if len(writes) != 1 || len(writes[0].Items) != 1 {
+		t.Fatalf("upstream saw %d writes, want 1 with one item", len(writes))
+	}
+	got := writes[0].Items[0].DocumentID
+	if got == nil {
+		t.Fatal("document_id was dropped before the request reached upstream")
+	}
+	if *got != "env:nas-hindsight-port" {
+		t.Fatalf("upstream received document_id %q, want %q", *got, "env:nas-hindsight-port")
+	}
+}
+
+// A caller that sends no document_id must not have one invented for it: an
+// empty string is a different instruction from an absent field, and a proxy that
+// sent one would collapse every untagged write onto a single document.
+func TestRetainOmitsDocumentIDWhenNotGiven(t *testing.T) {
+	s := newTestServer(t, routingTable)
+
+	if text, isErr := s.callTool(alphaToken, "retain", map[string]any{
+		"items": []any{map[string]any{"content": "a fact with no stable key"}},
+	}); isErr {
+		t.Fatalf("retain failed: %s", text)
+	}
+
+	writes := s.fake.writesTo("ops")
+	if len(writes) != 1 || len(writes[0].Items) != 1 {
+		t.Fatalf("upstream saw %d writes, want 1 with one item", len(writes))
+	}
+	if got := writes[0].Items[0].DocumentID; got != nil {
+		t.Fatalf("document_id was sent without being asked for: %q", *got)
+	}
+}
+
+// The parameter is only usable if an agent can discover it: a handler that
+// honours document_id while the schema hides it changes nothing for the caller.
+func TestRetainSchemaAdvertisesDocumentID(t *testing.T) {
+	var retain *mcpserver.ToolDef
+	for i := range mcpserver.Registry {
+		if mcpserver.Registry[i].Name == mcpserver.ToolRetain {
+			retain = &mcpserver.Registry[i]
+			break
+		}
+	}
+	if retain == nil {
+		t.Fatal("retain is not in the registry")
+	}
+
+	items, _ := retain.Schema["properties"].(map[string]any)["items"].(map[string]any)
+	props, _ := items["items"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["document_id"]; !ok {
+		t.Fatalf("retain's item schema does not advertise document_id: %v", props)
+	}
+
+	// Advertised over MCP too, not just in the Go value: the schema an agent
+	// reads is the one that goes out in tools/list.
+	s := newTestServer(t, routingTable)
+	resp := s.call(alphaToken, "tools/list", map[string]any{})
+	var res struct {
+		Tools []struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	resp.decodeResult(t, &res)
+	for _, tl := range res.Tools {
+		if tl.Name != mcpserver.ToolRetain {
+			continue
+		}
+		schema := mustJSON(t, tl.InputSchema)
+		if !strings.Contains(schema, `"document_id"`) {
+			t.Fatalf("tools/list schema for retain has no document_id: %s", schema)
+		}
+		return
+	}
+	t.Fatal("retain is missing from tools/list")
+}
+
 // --- Acceptance 5: the routing table hot-reloads -------------------------------
 
 func TestRoutingTableChangeTakesEffectWithoutRestart(t *testing.T) {
